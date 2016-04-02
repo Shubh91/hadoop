@@ -34,6 +34,8 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -102,6 +104,8 @@ public class RMContainerAllocator extends RMContainerRequestor
   static final Priority PRIORITY_FAST_FAIL_MAP;
   static final Priority PRIORITY_REDUCE;
   static final Priority PRIORITY_MAP;
+  static final Priority PRIORITY_FAST_FAIL_MAP1;
+  static final Priority PRIORITY_FAST_FAIL_MAP2;
 
   @VisibleForTesting
   public static final String RAMPDOWN_DIAGNOSTIC = "Reducer preempted "
@@ -111,12 +115,17 @@ public class RMContainerAllocator extends RMContainerRequestor
   private final AtomicBoolean stopped;
 
   static {
-    PRIORITY_FAST_FAIL_MAP = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(Priority.class);
-    PRIORITY_FAST_FAIL_MAP.setPriority(5);
-    PRIORITY_REDUCE = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(Priority.class);
-    PRIORITY_REDUCE.setPriority(10);
-    PRIORITY_MAP = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(Priority.class);
-    PRIORITY_MAP.setPriority(20);
+	    PRIORITY_FAST_FAIL_MAP = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(Priority.class);
+	    PRIORITY_FAST_FAIL_MAP.setPriority(7);
+	    PRIORITY_FAST_FAIL_MAP1 = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(Priority.class);
+	    PRIORITY_FAST_FAIL_MAP1.setPriority(6);
+	    PRIORITY_FAST_FAIL_MAP2 = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(Priority.class);
+	    PRIORITY_FAST_FAIL_MAP2.setPriority(5);
+	    PRIORITY_REDUCE = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(Priority.class);
+	    PRIORITY_REDUCE.setPriority(10);
+	    PRIORITY_MAP = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(Priority.class);
+	    PRIORITY_MAP.setPriority(20);
+    
   }
   
   /*
@@ -143,6 +152,14 @@ public class RMContainerAllocator extends RMContainerRequestor
 
   //holds information about the assigned containers to task attempts
   private final AssignedRequests assignedRequests = new AssignedRequests();
+  
+  //Regex matching for different attempts
+  String TaskAttempt = "attempt_[0-9]+_[0-9]+_m_[0-9]+_1";
+  String TaskAttempt1 = "attempt_[0-9]+_[0-9]+_m_[0-9]+_2";
+  String TaskAttempt2 = "attempt_[0-9]+_[0-9]+_m_[0-9]+_3";
+  Pattern MapTask = Pattern.compile(TaskAttempt);
+  Pattern MapTask1 = Pattern.compile(TaskAttempt1);
+  Pattern MapTask2 = Pattern.compile(TaskAttempt2);
   
   //holds scheduled requests to be fulfilled by RM
   private final ScheduledRequests scheduledRequests = new ScheduledRequests();
@@ -374,7 +391,8 @@ public class RMContainerAllocator extends RMContainerRequestor
           }
         }
         // set the resources
-        reqEvent.getCapability().setMemory(mapResourceRequest.getMemory());
+        //reqEvent.getCapability().setMemory(mapResourceRequest.getMemory());
+        //As we are not assigning equal memory to every map task
         reqEvent.getCapability().setVirtualCores(
           mapResourceRequest.getVirtualCores());
         scheduledRequests.addMap(reqEvent);//maps are immediately scheduled
@@ -993,9 +1011,23 @@ public class RMContainerAllocator extends RMContainerRequestor
       
       if (event.getEarlierAttemptFailed()) {
         earlierFailedMaps.add(event.getAttemptID());
-        request =
-            new ContainerRequest(event, PRIORITY_FAST_FAIL_MAP,
-                mapNodeLabelExpression);
+        Matcher m0 = MapTask.matcher(event.getAttemptID().toString());
+        Matcher m1 = MapTask1.matcher(event.getAttemptID().toString());
+        Matcher m2 = MapTask2.matcher(event.getAttemptID().toString());
+        //PRIORITY_FAST_FAIL_MAP = 5, PRIORITY_FAST_FAIL_MAP1 = 6, PRIORITY_FAST_FAIL_MAP =7 
+        if(m0.find()){
+        	request = new ContainerRequest(event, PRIORITY_FAST_FAIL_MAP, mapNodeLabelExpression);
+        }
+        else if(m1.find()){
+        	request = new ContainerRequest(event, PRIORITY_FAST_FAIL_MAP1, mapNodeLabelExpression);
+        }
+        else if(m2.find()){
+        	request = new ContainerRequest(event, PRIORITY_FAST_FAIL_MAP2, mapNodeLabelExpression);
+        }
+        else{
+        	request =new ContainerRequest(event, PRIORITY_FAST_FAIL_MAP, mapNodeLabelExpression);
+        }
+        //request =new ContainerRequest(event, PRIORITY_FAST_FAIL_MAP, mapNodeLabelExpression);
         LOG.info("Added "+event.getAttemptID()+" to list of failed maps");
       } else {
         for (String host : event.getHosts()) {
@@ -1053,8 +1085,8 @@ public class RMContainerAllocator extends RMContainerRequestor
         boolean isAssignable = true;
         Priority priority = allocated.getPriority();
         Resource allocatedResource = allocated.getResource();
-        if (PRIORITY_FAST_FAIL_MAP.equals(priority) 
-            || PRIORITY_MAP.equals(priority)) {
+        if (PRIORITY_FAST_FAIL_MAP.equals(priority)||PRIORITY_FAST_FAIL_MAP1.equals(priority)|| 
+        		PRIORITY_FAST_FAIL_MAP2.equals(priority)|| PRIORITY_MAP.equals(priority)) {
           if (ResourceCalculatorUtils.computeAvailableContainers(allocatedResource,
               mapResourceRequest, getSchedulerResourceTypes()) <= 0
               || maps.isEmpty()) {
@@ -1172,7 +1204,8 @@ public class RMContainerAllocator extends RMContainerRequestor
       ContainerRequest assigned = null;
       
       Priority priority = allocated.getPriority();
-      if (PRIORITY_FAST_FAIL_MAP.equals(priority)) {
+      if (PRIORITY_FAST_FAIL_MAP.equals(priority) || PRIORITY_FAST_FAIL_MAP1.equals(priority)
+    		  ||PRIORITY_FAST_FAIL_MAP2.equals(priority)) {
         LOG.info("Assigning container " + allocated + " to fast fail map");
         assigned = assignToFailedMap(allocated);
       } else if (PRIORITY_REDUCE.equals(priority)) {
@@ -1241,9 +1274,54 @@ public class RMContainerAllocator extends RMContainerRequestor
     private ContainerRequest assignToFailedMap(Container allocated) {
       //try to assign to earlierFailedMaps if present
       ContainerRequest assigned = null;
+      LOG.info("if we canAssignMaps" + canAssignMaps());
       while (assigned == null && earlierFailedMaps.size() > 0
           && canAssignMaps()) {
-        TaskAttemptId tId = earlierFailedMaps.removeFirst();      
+    	  TaskAttemptId tId = null; 
+    	  //Assigning the earlierfailed maps precisely 
+    	  if(allocated.getResource().getMemory() == (2*mapResourceRequest.getMemory())){
+    		  for(int i =0;i< earlierFailedMaps.size(); i++){
+    			 Matcher m0 = MapTask.matcher(earlierFailedMaps.get(i).toString());
+    			 if(m0.find()){
+    				 LOG.info("Assigning, depending on task attempt m_1: " + earlierFailedMaps.get(i).toString());
+    				 tId = earlierFailedMaps.get(i);
+    				 LOG.info("Task Removed and assigned : " + tId );
+     				 earlierFailedMaps.remove(tId);
+     				 break;
+    		   }
+    		  }
+    	  	 }
+    	  else if(allocated.getResource().getMemory() == (3*mapResourceRequest.getMemory())){
+    		  for(int i =0;i< earlierFailedMaps.size(); i++){
+    		  Matcher m1 = MapTask1.matcher(earlierFailedMaps.get(i).toString());
+    		  if(m1.find()){
+ 				 LOG.info("Assigning, depending on taskid m_2: " + earlierFailedMaps.get(i).toString());
+ 				 tId = earlierFailedMaps.get(i);
+ 				LOG.info("Task Removed and assigned : " + tId );
+ 				 earlierFailedMaps.remove(tId);
+ 				break;
+    		  }
+    		  
+    		}
+    	  }
+    	  else if(allocated.getResource().getMemory() == (4*mapResourceRequest.getMemory())){
+    		  for(int i =0;i< earlierFailedMaps.size(); i++){
+    		  Matcher m2 = MapTask2.matcher(earlierFailedMaps.get(i).toString());
+    		  if(m2.find()){
+ 				 LOG.info("Assigning, depending on taskid m_3: " + earlierFailedMaps.get(i).toString());
+ 				 tId = earlierFailedMaps.get(i);
+ 				 LOG.info("Task Removed and assigned : " + tId );
+				 earlierFailedMaps.remove(tId);
+				 break;
+    		  }
+    		} 
+    	  }
+    	  else{
+    		  LOG.info("ALLOCTED RESPONSE NOT ACCEPTED : " + allocated);
+    	  }
+    	  //tId = earlierFailedMaps.removeFirst();   
+        //LOG.info("Size of the Map : " + earlierFailedMaps.size());
+        //LOG.info("allocated : " + allocated.getId() + " " + allocated.getResource() + " to task " + tId);
         if (maps.containsKey(tId)) {
           assigned = maps.remove(tId);
           JobCounterUpdateEvent jce =
